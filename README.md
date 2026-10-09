@@ -1,110 +1,201 @@
 # operator-gauntlet
 
-Fault-tests Kubernetes operators against the rules experienced operator authors
-follow, and compares how well AI coding agents write them under four setups.
+**Do AI coding agents write Kubernetes operators that survive production?**
 
-Each generated operator runs as a user bound only to its own RBAC, behind an API
-proxy. The proxy SIGKILLs it at a deterministic crash point (the instant its
-first create succeeds, or the instant the fake cloud stores a create). A
-concurrent writer forces 409 conflicts, and the audit log counts the
-operator's API writes while idle. Every rule ([RULES.md](RULES.md)) is a
-deterministic pass/fail check with no LLM judge.
+operator-gauntlet is a fault-injection test suite for Kubernetes operators. It
+checks an operator against seven rules that experienced operator authors
+usually learn the hard way: crash safety, status discipline, quiet steady
+state, finalizers, ownership, conflict handling and least-privilege RBAC. It
+then uses those rules to compare AI coding agents across four setups, from
+"spec only" to "spec, scaffold, best-practice skill and test feedback".
+
+The headline question: **how many agent-built operators that pass their own
+tests still break at least one rule?**
+
+## Why this matters
+
+Ask an agent for an operator and you get a project that compiles, passes
+`make test` and reconciles the happy path. The bugs that matter show up later:
+
+- A crash between "create" and "record that I created it" leaves duplicate
+  cloud resources.
+- A finalizer that is never removed leaves namespaces stuck in `Terminating`.
+- A status update on every loop slowly fills etcd.
+- A `+kubebuilder:rbac` marker with wildcards gives the operator cluster-admin.
+
+Unit tests and LLM judges rarely catch these failures. operator-gauntlet
+reproduces each one on purpose and checks the result.
+
+## How it works
+
+```
+             ┌──────────────── envtest or kind control plane ────────────────┐
+ operator ──▶│  API proxy  ──▶  kube-apiserver  ──▶  audit log               │
+ (own RBAC   │  SIGKILL at the        ▲                (writes/min, 403s,    │
+  user only) │  first create          │                 409s, subresources)  │
+             │                 concurrent writer                             │
+             │                 (forces 409 conflicts)                        │
+             └───────────────────────────────────────────────────────────────┘
+                        fake cloud API (crash hook at stored create)
+```
+
+- **Real RBAC.** Each operator runs as a user bound only to the RBAC it
+  generated. Missing permissions show up as 403s, not silent passes.
+- **Deterministic crashes.** An API proxy SIGKILLs the manager the instant its
+  first create succeeds, before it sees the response. For the ManagedDatabase
+  spec, the fake cloud kills it the instant it stores a create.
+- **Forced conflicts.** A concurrent writer bumps `resourceVersion` on the
+  custom resource and its children at about 5 Hz while spec changes land.
+- **Audit-log evidence.** The suite counts the operator's API writes while it
+  is idle and checks that status goes through the status subresource.
+- **No LLM judge.** Every rule is a deterministic pass/fail check.
+
+## The seven rules
+
+Full detail is in [RULES.md](RULES.md).
+
+| ID | Rule | Hidden in S4 |
+| --- | --- | --- |
+| R1 | Crash-safe, idempotent reconcile | |
+| R2 | Status discipline (`observedGeneration`, no idle flapping) | |
+| R3 | Bounded steady-state writes | **Yes** |
+| R4 | Finalizer lifecycle: deletion never hangs or leaks | |
+| R5 | Ownership and garbage collection | |
+| R6 | Conflict handling, no lost updates | **Yes** |
+| R7 | Least-privilege RBAC | |
+
+Each spec's contract marks every rule as *stated* (the spec tells the agent) or
+*implicit* (an expert would follow it anyway). Results report the two
+separately.
+
+## The experiment
+
+Three operator specs, each with a different main risk:
+
+| Spec | What it builds | Main risk |
+| --- | --- | --- |
+| [WebApp](specs/webapp/SPEC.md) | Deployment and Service from one custom resource | Ownership, status, conflicts |
+| [ConfigSync](specs/configsync/SPEC.md) | Copies a ConfigMap into every namespace that matches a selector | Fan-out, steady-state writes |
+| [ManagedDatabase](specs/manageddatabase/SPEC.md) | Databases in an external cloud API | Crash safety, finalizers, leaks |
+
+Four setups, each adding one thing:
+
+| Setup | What the agent gets |
+| --- | --- |
+| S1 | The spec only. The agent runs `kubebuilder init` itself. |
+| S2 | A pre-scaffolded project with the API types written |
+| S3 | S2 plus an Agent Skill of controller best practices ([skill/](skill/controller-best-practices/SKILL.md)) |
+| S4 | S3 plus `./gauntlet-check`, which runs the **visible** rules only |
+
+R3 and R6 stay hidden in S4. If hidden-rule pass rates rise with feedback, the
+agent learned the rules. If only the visible rules improve, it learned to pass
+the tests.
+
+Agent adapters exist for Codex CLI, Claude Code and Gemini CLI. Each run
+records the agent's token usage, its own `make test` result and the full
+gauntlet log.
+
+## Is the suite itself trustworthy?
+
+A test suite is only useful if it catches real bugs and passes correct code.
+Validation ([testdata/VALIDATION.md](testdata/VALIDATION.md)):
+
+- **Reference operators pass 7/7** for all three specs.
+- **Seven WebApp mutants, one per rule, each fail the rule they target.** For
+  example, the R3 mutant rewrites status every reconcile and is caught at 60
+  writes/min, and the R7 mutant uses `groups=*,resources=*,verbs=*`.
+- When a mutant also fails another rule, the extra failure is a real
+  consequence. For example, missing owner references mean `Owns()` never
+  triggers, so status goes stale.
 
 ## Status
 
 | Part | State |
 | --- | --- |
-| Harness, checks, CLI (`go vet ./...` clean) | Done. Compiled and run against real envtest (Kubernetes v1.34.1). |
-| Reference operators for all three specs | Done: each passes 7/7 ([testdata/VALIDATION.md](testdata/VALIDATION.md)) |
-| Seven WebApp mutants, one per rule | Done: each is caught by the rule it targets |
-| Runner (prepare → agent → own tests → score → report) | Done. Tested end to end with the `replay-reference` oracle adapter (7/7) and the S4 `./gauntlet-check` (visible rules only). |
-| Agent adapters | Codex CLI, Claude Code, Gemini CLI, written from their docs. **Not yet run with real agents.** |
-| Kind mode (garbage collection, APF throttling) | Written, **not yet run** (needs Docker/colima) |
+| Harness, checks, CLI | Done. Runs against real envtest (Kubernetes v1.34.1). |
+| Reference operators (3 specs) | Done. Each passes 7/7. |
+| Mutants (one per rule) | Done. Each is caught by its rule. |
+| Runner (prepare, agent, own tests, score, report) | Done. Tested end to end with a stand-in "oracle" agent (7/7). |
+| Agent adapters (Codex, Claude Code, Gemini) | Written. **Not yet run with real agents.** |
+| Kind mode (garbage collection, APF throttling) | Written. **Not yet run.** |
 
-## Run it on your Mac
+## Quick start
 
-You need Go and at least one agent CLI (`codex`, `claude` or `gemini`). `make setup` installs everything else into `./bin`, using Homebrew only for GNU `timeout`.
+You need Go, and for the pilot at least one agent CLI (`codex`, `claude` or
+`gemini`). `make setup` installs everything else into `./bin`. It uses Homebrew
+only for GNU `timeout`.
 
 ```bash
-make setup      # kubebuilder, envtest binaries, GNU timeout; builds bin/gauntlet; writes .env.local and runner/models.txt
+make setup      # kubebuilder, envtest binaries, GNU timeout; builds bin/gauntlet
 make selftest   # scores the WebApp reference operator: expect 7/7 in about a minute
-make oracle     # runs the whole pilot pipeline with a stand-in agent: expect 7/7
-$EDITOR runner/models.txt   # setup lists the agent CLIs it found; pin real model IDs
-make pilot      # the real pilot (hours; stop and rerun any time, finished runs are skipped)
-make report     # the "k of n" table; also written to results/REPORT.md
+make oracle     # runs the full pilot pipeline with a stand-in agent: expect 7/7
 ```
 
-- **Codex** runs in its own workspace-write sandbox. Agents need network
-  access for `go mod download`. If builds fail with network errors inside the
-  sandbox, allow network for workspace-write in `~/.codex/config.toml`.
-- **Claude Code and Gemini** run with approvals off. Their adapters refuse to
-  run unless `GAUNTLET_SANDBOXED=1`, so run those inside a VM or container.
-- A single operator: `source .env.local && bin/gauntlet run --spec specs/webapp --operator <dir>`.
-  A full-length run takes 3–5 minutes.
-
-## Validate the suite (after any change to `pkg/`)
+Score one operator of your own (a full-length run takes 3–5 minutes):
 
 ```bash
-make validate      # ~10 min: 3 references + 7 mutants, prints a pass/fail matrix
+source .env.local
+bin/gauntlet run --spec specs/webapp --operator <dir>
 ```
-
-The references must pass everything, and each mutant must fail its rule. See
-[testdata/VALIDATION.md](testdata/VALIDATION.md) for the last run and why some
-mutants also fail other rules.
 
 ## Running the pilot
 
-1. **Install** `kubebuilder` (v4) and GNU `timeout` (`brew install coreutils`).
-2. **Choose models.** Copy `runner/models.example.txt` to `runner/models.txt`
-   and list 3 models with exact versions.
-3. **Sandbox the agents.** Run the pilot inside a disposable VM or container
-   (colima or a devcontainer). The agents run shell commands unattended.
-   `claude-code.sh` and `gemini.sh` refuse to run unless `GAUNTLET_SANDBOXED=1`.
-   Codex uses its own workspace-write sandbox.
-4. **Check the pipeline** with the oracle adapter. It should score 7/7:
+> **Warning:** The agents run shell commands unattended. Run the pilot inside a
+> disposable VM or container (for example colima or a devcontainer). The
+> Claude Code and Gemini adapters refuse to run unless `GAUNTLET_SANDBOXED=1`.
+> Codex uses its own workspace-write sandbox.
+
+1. List three models with exact versions in `runner/models.txt` (see
+   `runner/models.example.txt`).
+2. Run the pilot. It takes hours. Finished runs are skipped, so you can stop
+   and resume at any time.
    ```bash
-   echo "oracle|replay-reference.sh|reference" > /tmp/oracle.txt
-   MODELS_FILE=/tmp/oracle.txt SPECS=webapp SETUPS=S3 RUNS=1 OUT=/tmp/o RESULTS=/tmp/r runner/run-pilot.sh
+   make pilot
    ```
-5. **Run the pilot**, then produce the report:
+3. Produce the report. It is also written to `results/REPORT.md`.
    ```bash
-   SPECS="configsync manageddatabase webapp" SETUPS="S1 S2 S3 S4" RUNS=2 runner/run-pilot.sh
-   bin/gauntlet report results/*.json     # also written to results/REPORT.md
+   make report
    ```
 
 Each run gets a fresh workspace, `out/<spec>-<setup>-<model>-<n>/`, with the
-agent's output, its token usage (`.gauntlet/usage.json`), its own `make test`
-log and the gauntlet log. Runs that are already scored are skipped, so you can
-stop and resume. The report prints the abstract's headline: how many builds
-that passed their own tests broke at least one rule.
+agent's output, its token usage (`.gauntlet/usage.json`), its `make test` log
+and the gauntlet log.
 
-| Setup | What the agent gets |
-| --- | --- |
-| S1 | The spec only. The agent runs `kubebuilder init` itself. |
-| S2 | A pre-scaffolded project with the API types written (`specs/*/scaffold/types.go.tmpl`) |
-| S3 | S2 plus the Agent Skill in `skills/controller-best-practices/SKILL.md` |
-| S4 | S3 plus `./gauntlet-check`, which runs the **visible** rules only. R3 and R6 stay hidden. |
-
-`runner/run-pilot.sh` also reads these environment variables:
+`runner/run-pilot.sh` reads these environment variables:
 
 | Variable | Effect |
 | --- | --- |
 | `SPECS`, `SETUPS`, `RUNS` | Which slice of the matrix to run |
 | `AGENT_TIMEOUT` | Time limit per agent run (default 45m) |
 | `GAUNTLET_FLAGS` | Extra flags for `gauntlet run` (keep empty for real runs) |
-| `SKIP_OWN_TESTS=1` | Skip `make test` (for quick checks only) |
+| `SKIP_OWN_TESTS=1` | Skip `make test` (quick checks only) |
 | `MODELS_FILE`, `OUT`, `RESULTS` | Paths |
 
-## Kind mode (R5 garbage collection, APF throttling)
+Codex needs network access for `go mod download`. If builds fail with network
+errors, allow network for workspace-write in `~/.codex/config.toml`.
 
-envtest has no kube-controller-manager, so garbage collection can't run there.
-R5 checks owner references statically in envtest, and for real on kind:
+## Kind mode
+
+envtest has no kube-controller-manager, so garbage collection cannot run there.
+In envtest, R5 checks owner references statically. Kind mode checks real
+garbage collection and adds API Priority and Fairness throttling:
 
 ```bash
 kind/up.sh
 bin/gauntlet run --mode kind --kubeconfig .kind-kubeconfig --audit-log .kind-audit/audit.log \
   --spec specs/webapp --operator testdata/webapp-reference
 ```
+
+## Changing the suite
+
+After any change to `pkg/`, run the validation (about 10 minutes). It scores
+the 3 references and 7 mutants and prints a pass/fail matrix:
+
+```bash
+make validate
+```
+
+The references must pass every rule, and each mutant must fail its rule.
 
 ## Layout
 
@@ -115,25 +206,27 @@ specs/<spec>/scaffold/       API types for S2–S4
 RULES.md                     the seven rules and how each is checked
 pkg/harness                  envtest/kind control plane, scoped RBAC user, API proxy, concurrent writer
 pkg/checks                   per-spec fixtures and the R1–R7 phases
-pkg/fakecloud                fake cloud DB API with a crash hook (ManagedDatabase)
-pkg/audit                    audit-log parsing: writes/min, status-subresource use, 403s, 409s
-pkg/procctl                  build/run/SIGKILL/restart the manager binary
+pkg/fakecloud                fake cloud database API with a crash hook
+pkg/audit                    audit-log parsing: writes/min, status subresource use, 403s, 409s
+pkg/procctl                  build, run, SIGKILL and restart the manager binary
 pkg/rbaccheck                least-privilege check against the contract
 pkg/results                  result files and the "k of n" report
 cmd/gauntlet                 CLI: run | rbac | report
 cmd/fakecloud                standalone fake cloud for local development
 runner/                      pilot matrix, prompts, agent adapters, usage extraction
-skill/                       the Agent Skill used in S3/S4
+skill/                       the Agent Skill used in S3 and S4
 testdata/                    reference operators, mutant generator, validation script and results
 kind/                        kind cluster with audit logging and APF throttling
 ```
 
-## Notes
+## Known limitation
 
-- The harness passes `--advertise-address=127.0.0.1` to kube-apiserver, so
-  envtest starts in sandboxes with no default route. Kubebuilder's own
-  `make test` doesn't, so a generated project's tests can fail in such
-  sandboxes even when the code is fine. Run the pilot on a machine with a normal
-  network.
-- Rename the module path in `go.mod` from `example.com/operator-gauntlet` to
-  your repository path, and choose Apache-2.0 when you create the repository.
+The harness passes `--advertise-address=127.0.0.1` to kube-apiserver, so
+envtest starts in sandboxes with no default route. Kubebuilder's own
+`make test` does not, so a generated project's tests can fail in such
+sandboxes even when the code is correct. Run the pilot on a machine with a
+normal network.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
