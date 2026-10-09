@@ -1,0 +1,22 @@
+{
+  "spec": "manageddatabase",
+  "api": {"group": "bench.example.com", "version": "v1alpha1", "kind": "ManagedDatabase", "resource": "manageddatabases", "namespaced": true},
+  "usesFakeCloud": true,
+  "crashPoint": "fakecloud-create",
+  "steadyStateMaxWritesPerMinute": 0,
+  "rules": {
+    "R1": "stated",
+    "R2": "stated",
+    "R3": "implicit",
+    "R4": "stated",
+    "R5": "stated",
+    "R6": "implicit",
+    "R7": "implicit"
+  },
+  "rbacAllow": [
+    {"apiGroup": "bench.example.com", "resources": ["manageddatabases", "manageddatabases/status", "manageddatabases/finalizers"]},
+    {"apiGroup": "", "resources": ["secrets", "events"]},
+    {"apiGroup": "events.k8s.io", "resources": ["events"]},
+    {"apiGroup": "coordination.k8s.io", "resources": ["leases"]}
+  ]
+}

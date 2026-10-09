@@ -1,0 +1,23 @@
+{
+  "spec": "webapp",
+  "api": {"group": "bench.example.com", "version": "v1alpha1", "kind": "WebApp", "resource": "webapps", "namespaced": true},
+  "usesFakeCloud": false,
+  "crashPoint": "first-child-create",
+  "steadyStateMaxWritesPerMinute": 0,
+  "rules": {
+    "R1": "implicit",
+    "R2": "stated",
+    "R3": "implicit",
+    "R4": "implicit",
+    "R5": "stated",
+    "R6": "stated",
+    "R7": "implicit"
+  },
+  "rbacAllow": [
+    {"apiGroup": "bench.example.com", "resources": ["webapps", "webapps/status", "webapps/finalizers"]},
+    {"apiGroup": "apps", "resources": ["deployments"]},
+    {"apiGroup": "", "resources": ["services", "events"]},
+    {"apiGroup": "events.k8s.io", "resources": ["events"]},
+    {"apiGroup": "coordination.k8s.io", "resources": ["leases"]}
+  ]
+}

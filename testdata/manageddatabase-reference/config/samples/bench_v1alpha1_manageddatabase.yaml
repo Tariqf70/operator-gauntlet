@@ -1,0 +1,9 @@
+apiVersion: bench.example.com/v1alpha1
+kind: ManagedDatabase
+metadata:
+  labels:
+    app.kubernetes.io/name: manageddatabase-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: manageddatabase-sample
+spec:
+  # TODO(user): Add fields here

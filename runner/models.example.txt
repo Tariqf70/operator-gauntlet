@@ -1,0 +1,8 @@
+# label | adapter script in runner/agents/ | exact model ID
+# One line per model. Pin exact model versions, and record the date you ran them.
+# The adapters also save each agent CLI's --version output into the workspace.
+# Adapters: codex.sh (OpenAI Codex CLI), claude-code.sh (Claude Code),
+# gemini.sh (Gemini CLI), example-adapter.sh (template for anything else).
+modelA|codex.sh|<exact model id>
+modelB|claude-code.sh|<exact model id>
+modelC|gemini.sh|<exact model id>

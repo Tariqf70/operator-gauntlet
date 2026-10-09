@@ -1,0 +1,22 @@
+{
+  "spec": "configsync",
+  "api": {"group": "bench.example.com", "version": "v1alpha1", "kind": "ConfigSync", "resource": "configsyncs", "namespaced": false},
+  "usesFakeCloud": false,
+  "crashPoint": "first-child-create",
+  "steadyStateMaxWritesPerMinute": 0,
+  "rules": {
+    "R1": "implicit",
+    "R2": "stated",
+    "R3": "implicit",
+    "R4": "implicit",
+    "R5": "stated",
+    "R6": "implicit",
+    "R7": "implicit"
+  },
+  "rbacAllow": [
+    {"apiGroup": "bench.example.com", "resources": ["configsyncs", "configsyncs/status", "configsyncs/finalizers"]},
+    {"apiGroup": "", "resources": ["configmaps", "namespaces", "events"]},
+    {"apiGroup": "events.k8s.io", "resources": ["events"]},
+    {"apiGroup": "coordination.k8s.io", "resources": ["leases"]}
+  ]
+}

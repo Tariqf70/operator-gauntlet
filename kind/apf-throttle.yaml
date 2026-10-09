@@ -1,0 +1,41 @@
+# Throttle the operator's identity with API Priority and Fairness, so it sees
+# real latency and 429 responses. It matches the ServiceAccount the harness
+# creates in kind mode. Tune the queue sizes: the aim is noticeable slowness,
+# not total starvation.
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: PriorityLevelConfiguration
+metadata:
+  name: gauntlet-slow
+spec:
+  type: Limited
+  limited:
+    nominalConcurrencyShares: 1
+    limitResponse:
+      type: Queue
+      queuing:
+        queues: 1
+        handSize: 1
+        queueLengthLimit: 5
+---
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: FlowSchema
+metadata:
+  name: gauntlet-manager
+spec:
+  priorityLevelConfiguration:
+    name: gauntlet-slow
+  matchingPrecedence: 500
+  distinguisherMethod:
+    type: ByUser
+  rules:
+  - subjects:
+    - kind: ServiceAccount
+      serviceAccount:
+        name: gauntlet-manager
+        namespace: gauntlet-system
+    resourceRules:
+    - verbs: ["*"]
+      apiGroups: ["*"]
+      resources: ["*"]
+      clusterScope: true
+      namespaces: ["*"]

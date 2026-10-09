@@ -1,0 +1,8 @@
+bin/
+out/
+.kind-audit/
+.kind-kubeconfig
+runner/models.txt
+testdata/out/
+.env.local
+selftest.log

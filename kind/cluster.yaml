@@ -1,0 +1,36 @@
+# kind cluster for R5 (garbage collection) and API Priority and Fairness throttling.
+# Create it from the repo root with kind/up.sh so the relative hostPaths resolve.
+#
+# The audit log lands on the host at ./.kind-audit/audit.log; pass that path to
+# `gauntlet run --mode kind --audit-log`.
+#
+# If your kind/Kubernetes version uses kubeadm v1beta4, extraArgs must be a
+# list of {name, value} pairs instead of a map. Check `kind version`.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    apiServer:
+      extraArgs:
+        audit-log-path: /var/log/kubernetes/audit/audit.log
+        audit-policy-file: /etc/kubernetes/policies/audit-policy.yaml
+      extraVolumes:
+      - name: audit-policies
+        hostPath: /etc/kubernetes/policies
+        mountPath: /etc/kubernetes/policies
+        readOnly: true
+        pathType: DirectoryOrCreate
+      - name: audit-logs
+        hostPath: /var/log/kubernetes/audit
+        mountPath: /var/log/kubernetes/audit
+        readOnly: false
+        pathType: DirectoryOrCreate
+  extraMounts:
+  - hostPath: ./kind/audit-policy.yaml
+    containerPath: /etc/kubernetes/policies/audit-policy.yaml
+    readOnly: true
+  - hostPath: ./.kind-audit
+    containerPath: /var/log/kubernetes/audit

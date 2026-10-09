@@ -1,0 +1,211 @@
+// Package results defines the per-run result file and aggregates many runs
+// into the tables the talk needs ("k of n" per rule and setup).
+package results
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+// RuleResult is one rule's outcome for one build.
+type RuleResult struct {
+	ID      string             `json:"id"`
+	Pass    bool               `json:"pass"`
+	Skipped bool               `json:"skipped,omitempty"` // e.g. R5's GC phase outside kind
+	Stated  bool               `json:"stated"`
+	Hidden  bool               `json:"hidden"`
+	Details []string           `json:"details,omitempty"`
+	Metrics map[string]float64 `json:"metrics,omitempty"`
+}
+
+// Run is one generated operator scored once.
+type Run struct {
+	Spec           string       `json:"spec"`
+	Setup          string       `json:"setup"` // S1..S4
+	Model          string       `json:"model"`
+	Agent          string       `json:"agent"`
+	Attempt        int          `json:"attempt"`
+	StartedAt      time.Time    `json:"startedAt"`
+	FinishedAt     time.Time    `json:"finishedAt"`
+	BuildOK        bool         `json:"buildOK"`
+	OwnTestsPassed *bool        `json:"ownTestsPassed,omitempty"` // `make test` in the generated project
+	Mode           string       `json:"mode"`                     // envtest | kind
+	Rules          []RuleResult `json:"rules"`
+	CostUSD        float64            `json:"costUSD,omitempty"`
+	Usage          map[string]float64 `json:"usage,omitempty"` // token counters reported by the agent
+	Notes          []string     `json:"notes,omitempty"`
+}
+
+// Rule returns the result for id, if present.
+func (r *Run) Rule(id string) (RuleResult, bool) {
+	for _, rr := range r.Rules {
+		if rr.ID == id {
+			return rr, true
+		}
+	}
+	return RuleResult{}, false
+}
+
+// BrokeAny reports whether any non-skipped rule failed (a failed build counts as broken).
+func (r *Run) BrokeAny() bool {
+	if !r.BuildOK {
+		return true
+	}
+	for _, rr := range r.Rules {
+		if !rr.Skipped && !rr.Pass {
+			return true
+		}
+	}
+	return false
+}
+
+// Save writes the run as indented JSON.
+func (r *Run) Save(path string) error {
+	b, err := json.MarshalIndent(r, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0o644)
+}
+
+// LoadAll reads every *.json file matching the glob patterns.
+func LoadAll(patterns ...string) ([]Run, error) {
+	var runs []Run
+	for _, p := range patterns {
+		files, err := filepath.Glob(p)
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range files {
+			b, err := os.ReadFile(f)
+			if err != nil {
+				return nil, err
+			}
+			var r Run
+			if err := json.Unmarshal(b, &r); err != nil {
+				return nil, fmt.Errorf("%s: %w", f, err)
+			}
+			runs = append(runs, r)
+		}
+	}
+	return runs, nil
+}
+
+// Tally is "k of n".
+type Tally struct{ Pass, N int }
+
+func (t Tally) String() string {
+	if t.N == 0 {
+		return "–"
+	}
+	return fmt.Sprintf("%d/%d", t.Pass, t.N)
+}
+
+// Headline is the abstract's sentence: of the builds whose own tests passed, how many broke a rule.
+func Headline(runs []Run) (broke, ownPassed int) {
+	for i := range runs {
+		r := &runs[i]
+		if r.OwnTestsPassed == nil || !*r.OwnTestsPassed || !r.BuildOK {
+			continue
+		}
+		ownPassed++
+		if r.BrokeAny() {
+			broke++
+		}
+	}
+	return broke, ownPassed
+}
+
+// ByRuleAndSetup tallies passes per rule (rows) and setup (columns).
+// Failed builds count as a fail for every rule; skipped rules are excluded.
+func ByRuleAndSetup(runs []Run, rules []string) (setups []string, table map[string]map[string]Tally) {
+	seen := map[string]bool{}
+	table = map[string]map[string]Tally{}
+	for _, id := range rules {
+		table[id] = map[string]Tally{}
+	}
+	for i := range runs {
+		r := &runs[i]
+		seen[r.Setup] = true
+		for _, id := range rules {
+			t := table[id][r.Setup]
+			rr, ok := r.Rule(id)
+			switch {
+			case !r.BuildOK:
+				t.N++
+			case ok && rr.Skipped:
+				continue
+			case ok:
+				t.N++
+				if rr.Pass {
+					t.Pass++
+				}
+			}
+			table[id][r.Setup] = t
+		}
+	}
+	for s := range seen {
+		setups = append(setups, s)
+	}
+	sort.Strings(setups)
+	return setups, table
+}
+
+// StatedVsImplicit tallies passes separately for stated and implicit rules.
+func StatedVsImplicit(runs []Run) (stated, implicit Tally) {
+	for i := range runs {
+		for _, rr := range runs[i].Rules {
+			if rr.Skipped || !runs[i].BuildOK {
+				continue
+			}
+			t := &implicit
+			if rr.Stated {
+				t = &stated
+			}
+			t.N++
+			if rr.Pass {
+				t.Pass++
+			}
+		}
+	}
+	return stated, implicit
+}
+
+// Markdown renders the rule × setup table and headline.
+func Markdown(runs []Run, rules []string, hidden map[string]bool) string {
+	var b strings.Builder
+	broke, own := Headline(runs)
+	fmt.Fprintf(&b, "**%d of %d** builds that passed their own tests broke at least one rule.\n\n", broke, own)
+	st, im := StatedVsImplicit(runs)
+	fmt.Fprintf(&b, "Stated rules passed: %s. Implicit rules passed: %s.\n\n", st, im)
+	setups, table := ByRuleAndSetup(runs, rules)
+	b.WriteString("| Rule |")
+	for _, s := range setups {
+		b.WriteString(" " + s + " |")
+	}
+	b.WriteString("\n| --- |")
+	for range setups {
+		b.WriteString(" --- |")
+	}
+	b.WriteString("\n")
+	for _, id := range rules {
+		label := id
+		if hidden[id] {
+			label += " (hidden)"
+		}
+		b.WriteString("| " + label + " |")
+		for _, s := range setups {
+			b.WriteString(" " + table[id][s].String() + " |")
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
